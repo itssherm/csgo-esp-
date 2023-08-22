@@ -1,62 +1,88 @@
-#include "memory.h"
+#pragma once
+#pragma once
+#define WIN32_LEAN_AND_MEAN
+#include <Windows.h>
+#include <TlHelp32.h>
 
-#include <thread>
-namespace offsets
+#include <cstdint>
+#include <string_view>
+
+class Memory
 {
-	constexpr auto localplayer = 0xDEA964;
-	constexpr auto  entityList = 0x4DFFFC4;
-	constexpr auto glowObjectManager = 0x535AA70;
-	constexpr auto dwViewMatrix = 0x4DF0DF4;
+private:
+	std::uintptr_t processId = 0;
+	void* processHandle = nullptr;
 
-
-	constexpr auto teamNum = 0xF4;
-	constexpr auto glowIndex = 0x10488;
-}
-struct  vec2
-{
-	float x, y;
-};
-struct  vec3
-{
-	float x, y, z;
-};
-struct  vec4
-{
-	float x, y, z, w;
-};
-
-struct Color 
-{
-	constexpr Color(float r, float g, float b, float a = 1.f) noexcept :
-	r(r), g(g), b(b), a(a) {}
-	float r, g, b, a;
-};
-int main() 
-{
-	auto mem = Memory{ "csgo.exe" };
-
-	const auto client = mem.GetModuleAddress("client.dll");
-
-	const auto color = Color{ 3.f, 2.f, 2.f };
-	
-
-	while (true)
+public:
+	// Constructor that finds the process id
+	// and opens a handle
+	Memory(const std::string_view processName) noexcept
 	{
-		const auto localplayer = mem.Read<std::uintptr_t>(client + offsets::localplayer);
-		const auto glowObjectManager = mem.Read<std::uintptr_t>(client + offsets::glowObjectManager);
-		for (auto i = 0; i < 64; ++i)
+		::PROCESSENTRY32 entry = { };
+		entry.dwSize = sizeof(::PROCESSENTRY32);
+
+		const auto snapShot = ::CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+
+		while (::Process32Next(snapShot, &entry))
 		{
-			const auto entity = mem.Read<std::uintptr_t>(client + offsets::entityList + i * 0x10);
-			if (mem.Read<std::uintptr_t>(entity + offsets::teamNum) == mem.Read<std::uintptr_t>(localplayer + offsets::teamNum))
-				continue;
-			const auto glowIndex = mem.Read<std::int32_t>(entity + offsets::glowIndex);
-
-			mem.Write<Color>(glowObjectManager + (glowIndex * 0x38) + 0x8, color); //color
-
-	    	mem.Write<bool>(glowObjectManager + (glowIndex * 0x38) + 0x27, true); //a
-			mem.Write<bool>(glowObjectManager + (glowIndex * 0x38) + 0x28, true); //a
+			if (!processName.compare(entry.szExeFile))
+			{
+				processId = entry.th32ProcessID;
+				processHandle = ::OpenProcess(PROCESS_ALL_ACCESS, FALSE, processId);
+				break;
+			}
 		}
-		std::this_thread::sleep_for(std::chrono::microseconds(1));
-}
-	return 0;
-}
+
+		// Free handle
+		if (snapShot)
+			::CloseHandle(snapShot);
+	}
+
+	// Destructor that frees the opened handle
+	~Memory()
+	{
+		if (processHandle)
+			::CloseHandle(processHandle);
+	}
+
+	// Returns the base address of a module by name
+	const std::uintptr_t GetModuleAddress(const std::string_view moduleName) const noexcept
+	{
+		::MODULEENTRY32 entry = { };
+		entry.dwSize = sizeof(::MODULEENTRY32);
+
+		const auto snapShot = ::CreateToolhelp32Snapshot(TH32CS_SNAPMODULE, processId);
+
+		std::uintptr_t result = 0;
+
+		while (::Module32Next(snapShot, &entry))
+		{
+			if (!moduleName.compare(entry.szModule))
+			{
+				result = reinterpret_cast<std::uintptr_t>(entry.modBaseAddr);
+				break;
+			}
+		}
+
+		if (snapShot)
+			::CloseHandle(snapShot);
+
+		return result;
+	}
+
+	// Read process memory
+	template <typename T>
+	constexpr const T Read(const std::uintptr_t& address) const noexcept
+	{
+		T value = { };
+		::ReadProcessMemory(processHandle, reinterpret_cast<const void*>(address), &value, sizeof(T), NULL);
+		return value;
+	}
+
+	// Write process memory
+	template <typename T>
+	constexpr void Write(const std::uintptr_t& address, const T& value) const noexcept
+	{
+		::WriteProcessMemory(processHandle, reinterpret_cast<void*>(address), &value, sizeof(T), NULL);
+	}
+};
